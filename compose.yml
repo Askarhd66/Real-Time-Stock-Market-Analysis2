@@ -1,0 +1,177 @@
+services:
+# ------- Spark-Master-------
+  spark-master:
+    image: spark:3.5.1-python3         # Use the official Spark image with Python 3 support
+    container_name: spark-master       # Assign a fixed, human-readable name to the container
+    command: [                         # Override the default command to start the Spark master manually
+      "/opt/spark/bin/spark-class",
+      "org.apache.spark.deploy.master.Master",
+      "--host", "spark-master",
+      "--port", "7077",
+      "--webui-port", "8080"           # Set the hostname that other nodes use to reach the master
+    ]
+    environment:
+      - SPARK_MODE=master              # (Optional) indicateS this container is the master
+      - SPARK_MASTER_HOST=spark-master # Host name of the spark master, used by workers to connect
+    ports:
+      - "8081:8080"                    # Expose master web UI(container 8080) on host port 8081
+      - "7077:7077"                    # Expose spark master service port for worker/job communication
+    volumes:
+      - ./spark-data:/opt/spark/data   # Mount a local directory to persist Spark logs or data
+    networks:
+      - stock_data                     # Connect the container to the stock_data network for better isolation
+
+# ----------------------------------------------------------------------------------------
+# Note: The above configuration sets up a Spark master node with the following key features:
+# 1. Uses the official Spark image with Python 3 support.
+# 2. Assigns a fixed container name for easier management.
+# 3. Overrides the default command to start the Spark master with specific host and port settings.
+# 4. Exposes the Spark master web UI on a different host port to avoid conflicts.
+# 5. Mounts a local directory for data persistence, which can be useful for logs or intermediate data storage.
+# 6. Connects the container to a custom network for better isolation and communication with other services in the same network.
+# ----------------------------------------------------------------------------------------
+
+# ------- Spark-Worker-------
+ 
+  spark-worker:
+    image: spark:3.5.1-python3        
+    container_name: spark-worker       # Assign a fixed name to the worker container
+    command: [                         # Override the default command to start the Spark worker manually
+      "/opt/spark/bin/spark-class",
+      "org.apache.spark.deploy.worker.Worker",
+      "spark://spark-master:7077",
+      "--webui-port", "8081"          
+    ]
+    environment:
+      - SPARK_WORKER_CORES=2           # Allocate 2 CPU cores for the worker
+      - SPARK_WORKER_MEMORY=2G         # Allocate 2 GB of memory for the worker
+    volumes:
+      - ./spark-data:/opt/spark/data   # Share the same local directory for consistency in data storage
+    networks:
+      - stock_data                     # Attach the same network as the master for communication
+
+# ----------------------------------------------------------------------------------------
+# Note: The above configuration sets up a Spark worker node with the following key features:
+# 1. Uses the same Spark image as the master for compatibility.   
+# 2. Assigns a fixed container name for easier management.
+# 3. Overrides the default command to start the Spark worker and connect it to the master.
+# 4. Allocates specific CPU cores and memory to the worker for resource management. 
+# 5. Shares the same local directory as the master for consistent data storage and access.
+# 6. Connects to the same custom network to enable communication with the master and other services.
+# ----------------------------------------------------------------------------------------
+
+# -------Kafka Services-------
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.10                     # use the Confluent Kafka image, which includes Kafka and its dependencies
+    container_name: kafka                                   # explicit container name for easier reference
+    hostname: kafka                                         # Hostname used inside the Docker network, important for Kafka's advertised listeners
+    ports:
+      - "9092:9092"                                         # Internal listner for docker network communication
+      - "9094:9094"                                         # External listener for local host (python clients)
+    environment:
+      KAFKA_KRAFT_MODE: "true"                              # Enable KRaft mode, so no Zookeeper
+      KAFKA_PROCESS_ROLES: "broker, controller"             # Kafka acts as both broker and controller in KRaft mode
+      KAFKA_NODE_ID: "1"                                    # Unique ID for the Kafka node
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"        # Define the controller quorum voters for KRaft mode
+      
+      # Define all listner endpoints and ports
+      KAFKA_LISTENERS: "PLAINTEXT_INTERNAL://kafka:9092,PLAINTEXT_EXTERNAL://kafka:9094, CONTROLLER://0.0.0.0:9093"
+      
+      # Map listeners names to security protocols (PLAINTEXT in this case, no encryption or authentication)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT_INTERNAL:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT_INTERNAL" # Brokers communicate via the internal listener
+      KAFKA_CONTROLLER_LISTENER_NAME: "CONTROLLER"           # Controller listener name
+      
+      # Tell kafka how it should advertise itself to clients (both internal and external)
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT_INTERNAL://kafka:9092,PLAINTEXT_EXTERNAL://localhost:9094" # Advertise internal listener for other containers and external listener for host clients
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"                  # Directory inside the container where Kafka will store its logs/messages and data
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"                # Allow Kafka to automatically create topics when they are referenced by producers or consumers
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1              # Set replication factor for internal topics to 1 since we have only one broker
+      KAFKA_LOG_RETENTION_HOURS: 168                         # Retain logs for 7 days (168 hours)
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0              # Reduce consumer group rebalance delay for faster startup
+      CLUSTER_ID: "lTZtuU6rTQGgGXeXktO-4A"                   # Unique Kafka cluster id, required in KRaft mode
+    volumes:
+      - kafka-data:/var/lib/kafka/data                       # Persist Kafka data on the host machine using a named volume
+    networks:
+      - stock_data                                           # Connect Kafka to the same network as Spark for communication 
+# ----------------------------------------------------------------------------------------
+# Note: The above configuration sets up a Kafka broker in KRaft mode with the following key features:
+# 1. Uses the Confluent Kafka image, which includes Kafka and its dependencies.
+# 2. Assigns a fixed container name and hostname for easier reference and internal communication.
+# 3. Exposes two ports: one for internal communication between containers and another for external communication with host clients.
+# 4. Configures Kafka to run in KRaft mode, eliminating the need for Zookeeper.
+# 5. Defines listeners for both internal and external communication, as well as a controller listener
+# 6. Maps listeners to security protocols (PLAINTEXT in this case, meaning no encryption or authentication).
+# 7. Sets the advertised listeners to ensure that clients can connect correctly, both from within the Docker network and from the host machine.
+# 8. Configures Kafka to automatically create topics when they are referenced by producers or consumers
+# 9. Sets a retention policy for logs and messages, and reduces consumer group rebalance delay for faster startup.
+# 10. Uses a named volume to persist Kafka data on the host machine, ensuring that data is not lost when the container is stopped or removed.
+# ----------------------------------------------------------------------------------------    
+
+# -------Kafka UI Services-------
+  kafka-ui:
+    container_name: kafka-ui                              # Explicit container name for easier reference
+    image: provectuslabs/kafka-ui:v0.7.2                  # Use a Kafka UI image to provide a web interface for managing and monitoring Kafka
+    ports:
+      - "8085:8080"                                       # Map kafka UI web interface to host port 8085
+    depends_on:
+      - kafka                                             # Ensure Kafka starts before the UI to avoid connection issues
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local                        # Name of the Kafka cluster as it will display in the UI
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092       # internal kafka connection (inside the docker network) for the UI to connect to the Kafka broker
+      DYNAMIC_CONFIG: 'true'                              # Enable dynamic configuration to allow the UI to update cluster information without restarting
+    networks:
+      - stock_data                                        # Connect Kafka UI to the same network as Kafka for communication
+# ----------------------------------------------------------------------------------------
+# Note: The above configuration sets up a Kafka UI service with the following key features:   
+# 1. Uses a specific Kafka UI image to provide a web interface for managing and monitoring Kafka.
+# 2. Assigns a fixed container name for easier reference.
+# 3. Maps the UI's web interface to a specific host port for easy access.
+# 4. Specifies a dependency on the Kafka service to ensure that Kafka starts before the UI, preventing connection issues.
+# 5. Configures environment variables to define the Kafka cluster name and bootstrap servers for the UI to connect to the Kafka broker.
+# 6. Enables dynamic configuration to allow the UI to update cluster information without needing a restart.
+# 7. Connects the Kafka UI to the same custom network as Kafka to enable communication between the UI and the Kafka broker.
+# ----------------------------------------------------------------------------------------  
+
+# -------Postgres Service-------
+  postgres:
+    image: debezium/postgres:17 
+    container_name: postgres_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: stock_data
+    ports:
+      - "5432:5432" 
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - stock_data
+# ----------------------------------------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4:9
+    container_name: pgadmin
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - stock_data
+# ----------------------------------------------------------------------------------------
+# Note: The above configuration sets up a PostgreSQL database and a pgAdmin service
+
+# -------Volumes and Networks-------
+volumes:
+  spark-data:                   # Named volume for Spark logs/data persistence
+  kafka-data:                   # Named volume for Kafka logs/topic data persistence
+  ivy_cache:                    # Named volume for pyspark instslled packages
+  postgres-data:                # Named volume for PostgreSQL data persistence
+
+networks:
+  stock_data:                   # Custom network for all services to communicate securely and efficiently
